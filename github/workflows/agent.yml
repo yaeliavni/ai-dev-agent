@@ -1,21 +1,30 @@
-name: AI Agent Trigger
+name: MiniMax AI Agent
 on:
   issue_comment:
     types: [created]
 
 jobs:
-  run-agent:
-    # הפקודה תרוץ רק אם התגובה מכילה את המילה @agent
+  run-minimax-agent:
+    # רץ רק אם התגובה מתחילה ב- @agent
     if: contains(github.event.comment.body, '@agent')
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: OpenHands Placeholder
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Run OpenHands with MiniMax
         env:
-          ANTHROPIC_API_KEY: ${{ secrets.LLM_API_KEY }}
+          # כאן אנחנו משתמשים במפתח שתוסיף בסוף
+          MINIMAX_API_KEY: ${{ secrets.MINIMAX_API_KEY }}
           GITHUB_TOKEN: ${{ secrets.MY_GITHUB_TOKEN }}
+          AGENT_PROMPT: ${{ github.event.comment.body }}
         run: |
-          echo "הסוכן זוהה בהצלחה!"
-          echo "ההוראה שנשלחה: ${{ github.event.comment.body }}"
+          echo "מפעיל את הסוכן עם מודל MiniMax M2.1..."
+          # כאן תבוא הפקודה שמריצה את OpenHands בגרסת ה-CLI שלו
+          # בינתיים זה רק ידפיס שהכל מוכן לפעולה
+          echo "הסוכן מוכן. ממתין ל-API Key להפעלה מלאה."

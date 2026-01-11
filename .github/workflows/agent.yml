@@ -14,7 +14,7 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v4
 
-      # 2. Communicate with MiniMax AI (URL updated to fix 404 error)
+      # 2. Communicate with MiniMax AI and write changes to the file
       - name: Call MiniMax
         id: minimax
         run: |
@@ -24,28 +24,32 @@ jobs:
             -d '{
               "model": "MiniMax-M2.1",
               "messages": [
-                {"role": "system", "content": "You are a dev agent. If you want to change a file, use format: file: <path> content: <code>. Be concise."},
+                {"role": "system", "content": "You are a dev agent. Just provide the text for a new README.md file based on the user request. Do not include markdown code fences, just raw text."},
                 {"role": "user", "content": "${{ github.event.comment.body }}"}
               ]
             }')
           
-          # Print the raw response for debugging purposes in the Actions log
+          # Debug: Show the API response in the logs
           echo "Debug: API Response is: $RESPONSE"
           
-          # Extract the AI's content from the JSON response
+          # Extract the AI's response content
           RESULT=$(echo $RESPONSE | jq -r '.choices[0].message.content // "ERROR"')
           
-          # Set the output variable using EOF to handle multi-line code properly
+          # CRITICAL: This line overwrites the README.md file with the AI's output
+          # Without this, GitHub sees no changes and won't create a Pull Request.
+          echo -e "$RESULT" > README.md
+          
+          # Set the output variable for the next step
           echo "ai_output<<EOF" >> $GITHUB_OUTPUT
           echo -e "$RESULT" >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
 
-      # 3. Automatically create a Pull Request with the AI's suggested changes
+      # 3. Automatically create a Pull Request because the README.md has changed
       - name: Create Pull Request
         uses: peter-evans/create-pull-request@v6
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           commit-message: "AI update from MiniMax"
           title: "AI Suggestion for Issue #${{ github.event.issue.number }}"
-          body: "AI generated this change. Response: ${{ steps.minimax.outputs.ai_output }}"
+          body: "AI generated this change based on your request."
           branch: ai-fix-${{ github.event.issue.number }}

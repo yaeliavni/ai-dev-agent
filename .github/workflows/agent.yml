@@ -1,4 +1,5 @@
 name: Agent Code (Diff -> PR)
+
 on:
   issue_comment:
     types: [created]
@@ -7,14 +8,21 @@ permissions:
   contents: write
   pull-requests: write
 
+concurrency:
+  group: agent-code-${{ github.event.issue.number }}
+  cancel-in-progress: true
+
 jobs:
   run-agent:
+    # Triggered by @agent-code
     if: contains(github.event.comment.body, '@agent-code')
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -28,58 +36,108 @@ jobs:
 
       - name: Install dependencies
         run: |
+          # Ensure a package.json exists to satisfy pnpm requirements
           if [ ! -f package.json ]; then
-            echo '{"name":"agent-demo","scripts":{"lint":"echo skip","test":"echo skip","build":"echo skip"}}' > package.json
+            echo '{"name":"agent-project","scripts":{"lint":"echo","test":"echo","build":"echo"}}' > package.json
           fi
           pnpm install
 
-      - name: Call MiniMax (With Demo Fallback)
+      - name: Call MiniMax (request unified diff)
         id: minimax
         env:
           MINIMAX_API_KEY: ${{ secrets.MINIMAX_API_KEY }}
           COMMENT_BODY: ${{ github.event.comment.body }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          REPO: ${{ github.repository }}
         run: |
-          if [ -z "$MINIMAX_API_KEY" ]; then
-            echo "Generating Clean Demo Content..."
-            echo "# AI-Enhanced Repository" > clean_readme.txt
-            echo "This project features a GitHub Action Agent." >> clean_readme.txt
-            echo "Status: API Key Pending." >> clean_readme.txt
-          else
-            cat > call-agent.mjs <<'MJS'
+          set -euo pipefail
+
+          cat > call-agent.mjs <<'MJS'
           import { writeFileSync } from "node:fs";
+
+          const apiKey = process.env.MINIMAX_API_KEY;
+          if (!apiKey) {
+            console.error("Missing MINIMAX_API_KEY secret.");
+            process.exit(1);
+          }
+
+          const system =
+            "You are a senior code-change agent operating inside a Git repo. " +
+            "Output MUST be a single unified diff patch only (git-style). " +
+            "No explanations, no markdown, no code fences. " +
+            "If no change is needed, output exactly: NO_CHANGES.";
+
+          const user =
+            `Repo: ${process.env.REPO}\n` +
+            `Issue: #${process.env.ISSUE_NUMBER}\n` +
+            `Request:\n${process.env.COMMENT_BODY}\n\n` +
+            "Rules:\n" +
+            "- Return ONLY unified diff (or NO_CHANGES).\n" +
+            "- Keep changes minimal.\n";
+
+          const payload = {
+            model: "MiniMax-M2.1",
+            messages: [
+              { role: "system", content: system },
+              { role: "user", content: user },
+            ],
+          };
+
+          // Using stable endpoint to prevent 404 errors
           const res = await fetch("https://api.minimax.io/v1/chat/completions", {
             method: "POST",
-            headers: { 
-              "Authorization": `Bearer ${process.env.MINIMAX_API_KEY}`,
-              "Content-Type": "application/json" 
+            headers: {
+              Authorization: `Bearer ${apiKey}`,
+              "Content-Type": "application/json",
             },
-            body: JSON.stringify({
-              model: "MiniMax-M2.1",
-              messages: [{ role: "user", content: process.env.COMMENT_BODY }]
-            })
+            body: JSON.stringify(payload),
           });
+
           const data = await res.json();
-          writeFileSync("clean_readme.txt", data.choices?.[0]?.message?.content || "NO_CHANGES");
+          if (!res.ok) {
+            console.error("MiniMax API error:", res.status, JSON.stringify(data));
+            process.exit(1);
+          }
+
+          const content = data?.choices?.[0]?.message?.content || "NO_CHANGES";
+          writeFileSync("agent.patch", content.trim() + "\n", "utf8");
           MJS
-            node call-agent.mjs
+
+          node call-agent.mjs
+
+      - name: Apply patch
+        id: apply
+        run: |
+          set -euo pipefail
+
+          if [ ! -f agent.patch ] || [ "$(cat agent.patch)" = "NO_CHANGES" ]; then
+            echo "changed=false" >> $GITHUB_OUTPUT
+            exit 0
           fi
 
-      - name: Finalize Project Files
+          # Attempt to apply the patch precisely as the manager intended
+          if git apply --whitespace=fix agent.patch; then
+            echo "changed=true" >> $GITHUB_OUTPUT
+          else
+            echo "Patch failed to apply. The model output was likely not a valid diff."
+            exit 1
+          fi
+
+      - name: Cleanup Temporary Files
+        # Ensures internal scripts are not committed to the Pull Request
         run: |
-          # Overwrite README with the result
-          cat clean_readme.txt > README.md
-          
-          # CRITICAL: Delete temporary scripts so they aren't committed to the PR
           rm -f call-agent.mjs
-          rm -f clean_readme.txt
-          rm -f pnpm-lock.yaml
+          rm -f agent.patch
 
       - name: Create Pull Request
+        if: steps.apply.outputs.changed == 'true'
         uses: peter-evans/create-pull-request@v6
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          commit-message: "agent-code: professional update"
-          title: "agent-code: AI Suggestion for README"
-          body: "Verified workflow. Ready for API Key activation."
-          branch: agent-final-demo
+          commit-message: "agent-code: apply AI patch"
+          title: "agent-code: changes for #${{ github.event.issue.number }}"
+          body: |
+            Applied a unified diff patch generated by the MiniMax agent.
+            Original request: ${{ github.event.comment.body }}
+          branch: agent-code-${{ github.event.issue.number }}
           delete-branch: true

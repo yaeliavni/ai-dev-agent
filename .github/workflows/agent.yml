@@ -127,24 +127,27 @@ jobs:
         run: |
           set -euo pipefail
           
+          # Check if the patch exists and has content
           if [ ! -f agent.patch ] || [ "$(cat agent.patch)" = "NO_CHANGES" ]; then
-            echo "No valid patch found."
             echo "changed=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
-          # Apply the patch using 3-way merge to handle context shifts
-          # We use || true because we will check the diff status manually next
-          git apply --3way --whitespace=fix agent.patch || { echo "Patch failed to apply"; exit 1; }
+          # 1. Apply the AI changes
+          git apply --3way --whitespace=fix --verbose agent.patch
 
-          # IMPORTANT: The peter-evans action needs changes to be either 
-          # staged or unstaged, but we must verify they exist.
-          if [ -n "$(git status --porcelain)" ]; then
-            echo "Changes detected."
-            echo "changed=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "No changes after applying patch."
+          # 2. CLEANUP: Delete agent scripts/patches BEFORE staging
+          # This prevents call-agent.mjs and agent.patch from appearing in the PR
+          rm -f call-agent.mjs agent.patch
+
+          # 3. Stage only the intended code changes
+          git add .
+
+          # Check if there are actual changes to commit
+          if git diff --staged --quiet; then
             echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Create Pull Request

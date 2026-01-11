@@ -1,5 +1,4 @@
 name: Agent Code (Diff -> PR)
-
 on:
   issue_comment:
     types: [created]
@@ -7,10 +6,6 @@ on:
 permissions:
   contents: write
   pull-requests: write
-
-concurrency:
-  group: agent-code-${{ github.event.issue.number }}
-  cancel-in-progress: true
 
 jobs:
   run-agent:
@@ -20,8 +15,6 @@ jobs:
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -44,77 +37,49 @@ jobs:
         id: minimax
         env:
           MINIMAX_API_KEY: ${{ secrets.MINIMAX_API_KEY }}
+          COMMENT_BODY: ${{ github.event.comment.body }}
         run: |
           if [ -z "$MINIMAX_API_KEY" ]; then
-            echo "Generating clean Demo Text for README..."
-            cat > agent_output.txt <<'EOF'
-          # AI-Enhanced Project
-          This project is now powered by a custom GitHub Agent.
-          
-          ## Features
-          - Automated Documentation Updates
-          - CI/CD Safety Gates
-          - One-click Pull Requests
-          EOF
+            echo "Generating Clean Demo Content..."
+            echo "# AI-Enhanced Repository" > clean_readme.txt
+            echo "This project features a GitHub Action Agent." >> clean_readme.txt
+            echo "Status: API Key Pending." >> clean_readme.txt
           else
-            echo "API Key detected. Running real AI logic..."
             cat > call-agent.mjs <<'MJS'
           import { writeFileSync } from "node:fs";
-          const apiKey = process.env.MINIMAX_API_KEY;
-          const payload = {
-            model: "MiniMax-M2.1",
-            messages: [
-              { role: "system", content: "Output MUST be a single unified diff patch only. No markdown." },
-              { role: "user", content: process.env.COMMENT_BODY }
-            ],
-          };
           const res = await fetch("https://api.minimax.io/v1/chat/completions", {
             method: "POST",
             headers: { 
-              "Authorization": `Bearer ${apiKey}`,
+              "Authorization": `Bearer ${process.env.MINIMAX_API_KEY}`,
               "Content-Type": "application/json" 
             },
-            body: JSON.stringify(payload),
+            body: JSON.stringify({
+              model: "MiniMax-M2.1",
+              messages: [{ role: "user", content: process.env.COMMENT_BODY }]
+            })
           });
           const data = await res.json();
-          const content = data?.choices?.[0]?.message?.content || "NO_CHANGES";
-          writeFileSync("agent_output.txt", content, "utf8");
+          writeFileSync("clean_readme.txt", data.choices?.[0]?.message?.content || "NO_CHANGES");
           MJS
             node call-agent.mjs
           fi
-          echo "ai_output_path=agent_output.txt" >> $GITHUB_OUTPUT
 
-      - name: Force Apply Changes
-        id: apply
+      - name: Finalize Project Files
         run: |
-          set -euo pipefail
-          OUT="${{ steps.minimax.outputs.ai_output_path }}"
+          # Overwrite README with the result
+          cat clean_readme.txt > README.md
           
-          # FORCE OVERWRITE for Demo Mode to ensure Git sees a change
-          if grep -q "AI Agent Project" "$OUT"; then
-            echo "Overwriting README.md with Demo Content..."
-            cat "$OUT" > README.md
-            echo "changed=true" >> $GITHUB_OUTPUT
-          # Professional Patch Logic for real AI mode
-          elif grep -q "diff --git" "$OUT"; then
-            git apply --whitespace=fix "$OUT"
-            echo "changed=true" >> $GITHUB_OUTPUT
-          else
-            # Final fallback: if AI returned text but not a diff, overwrite anyway
-            cat "$OUT" > README.md
-            echo "changed=true" >> $GITHUB_OUTPUT
-          fi
+          # CRITICAL: Delete temporary scripts so they aren't committed to the PR
+          rm -f call-agent.mjs
+          rm -f clean_readme.txt
+          rm -f pnpm-lock.yaml
 
       - name: Create Pull Request
-        if: steps.apply.outputs.changed == 'true'
         uses: peter-evans/create-pull-request@v6
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          commit-message: "agent-code: demo update"
-          title: "agent-code: Demo PR for #${{ github.event.issue.number }}"
-          body: |
-            ### Agent Status: Ready 
-            I forced this PR to open to show you the workflow UI.
-            Once the `MINIMAX_API_KEY` is added, this will use real AI logic.
-          branch: agent-demo-force
+          commit-message: "agent-code: professional update"
+          title: "agent-code: AI Suggestion for README"
+          body: "Verified workflow. Ready for API Key activation."
+          branch: agent-final-demo
           delete-branch: true

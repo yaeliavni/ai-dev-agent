@@ -9,6 +9,22 @@ comment_body = os.getenv("COMMENT_BODY")
 issue_number = int(os.getenv("ISSUE_NUMBER"))
 repo_name = os.getenv("REPO_NAME")
 
+def call_minimax(prompt, api_key):
+    url = "https://api.minimax.io/v1/text/chat/completions_pro"
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "model": "MiniMax-M2.1", # המודל שהמנהל בחר
+        "messages": [{"role": "user", "content": prompt}],
+        "tokens_to_generate": 4096,
+        "temperature": 0.01 # טמפרטורה נמוכה לקוד מדויק
+    }
+    # כאן תבוא הפקודה: response = requests.post(url, json=payload, headers=headers)
+    # בינתיים נחזיר תשובה דמה עם תגיות מחשבה לניסוי
+    return "<think>אני מנתח את הבקשה ויוצר קובץ חדש.</think> הנה הקוד המבוקש..."
+
 def extract_thinking_and_respond(issue, raw_response):
     # חיפוש תגיות המחשבה של MiniMax
     if "<think>" in raw_response:

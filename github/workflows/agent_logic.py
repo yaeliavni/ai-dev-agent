@@ -9,6 +9,18 @@ comment_body = os.getenv("COMMENT_BODY")
 issue_number = int(os.getenv("ISSUE_NUMBER"))
 repo_name = os.getenv("REPO_NAME")
 
+def create_pull_request(repo, branch_name, file_path, new_content):
+    # 1. יצירת ענף (Branch) חדש
+    main_branch = repo.get_branch("main")
+    repo.create_git_ref(ref=f"refs/heads/{branch_name}", sha=main_branch.commit.sha)
+    
+    # 2. עדכון הקובץ
+    contents = repo.get_contents(file_path, ref="main")
+    repo.update_file(contents.path, "AI bug fix", new_content, contents.sha, branch=branch_name)
+    
+    # 3. פתיחת PR
+    repo.create_pull(title=f"AI Fix: {file_path}", body="תיקון אוטומטי על ידי MiniMax M2.1", head=branch_name, base="main")
+
 def run_agent():
     g = Github(gh_token)
     repo = g.get_repo(repo_name)

@@ -131,23 +131,28 @@ jobs:
             exit 0
           fi
 
-          # Use --ignore-space-change and --ignore-whitespace to handle AI formatting quirks.
-          # Use --recount to allow Git to automatically fix incorrect hunk headers (line counts).
-          git apply --3way --ignore-space-change --ignore-whitespace --recount agent.patch || {
-            echo "Patch application failed. Checking if files were partially updated..."
-          }
+          # Use --recount to fix the "corrupt patch" line count errors
+          # Use --ignore-whitespace to handle AI formatting issues
+          if git apply --3way --ignore-space-change --ignore-whitespace --recount agent.patch; then
+            echo "Patch applied successfully"
+          else
+            echo "Standard apply failed. Forcing a rough apply..."
+            # Fallback: try to apply while ignoring as much formatting as possible
+            git apply --reject --whitespace=fix agent.patch || true
+          fi
 
-          # CLEANUP: Remove scripts and patches BEFORE staging
+          # CLEANUP: Remove scripts BEFORE staging so they aren't in the PR
           rm -f call-agent.mjs agent.patch pnpm-lock.yaml
-
-          # Stage all changes (new files, modifications, and new directories)
+          
           git add .
 
-          # Final check for changes
+          # Check if we actually have changes staged
           if [ -n "$(git status --porcelain)" ]; then
             echo "changed=true" >> "$GITHUB_OUTPUT"
           else
+            echo "No changes detected to stage."
             echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 1 # Fail the step so you know why the PR wasn't created
           fi
 
       - name: Create Pull Request

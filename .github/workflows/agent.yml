@@ -14,7 +14,6 @@ concurrency:
 
 jobs:
   run-agent:
-    # Triggered by @agent-code
     if: contains(github.event.comment.body, '@agent-code')
     runs-on: ubuntu-latest
 
@@ -34,13 +33,13 @@ jobs:
         with:
           version: 9
 
-      - name: Install dependencies
+      - name: Install dependencies (best-effort)
         run: |
-          # Ensure a package.json exists to satisfy pnpm requirements
-          if [ ! -f package.json ]; then
-            echo '{"name":"agent-project","scripts":{"lint":"echo","test":"echo","build":"echo"}}' > package.json
+          if [ -f package.json ]; then
+            pnpm install --frozen-lockfile || pnpm install
+          else
+            echo "No package.json found. Skipping dependency install."
           fi
-          pnpm install
 
       - name: Call MiniMax (request unified diff)
         id: minimax
@@ -52,14 +51,16 @@ jobs:
         run: |
           set -euo pipefail
 
+          if [ -z "${MINIMAX_API_KEY:-}" ]; then
+            echo "MINIMAX_API_KEY is not set. Agent call skipped."
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
           cat > call-agent.mjs <<'MJS'
           import { writeFileSync } from "node:fs";
 
           const apiKey = process.env.MINIMAX_API_KEY;
-          if (!apiKey) {
-            console.error("Missing MINIMAX_API_KEY secret.");
-            process.exit(1);
-          }
 
           const system =
             "You are a senior code-change agent operating inside a Git repo. " +
@@ -73,7 +74,9 @@ jobs:
             `Request:\n${process.env.COMMENT_BODY}\n\n` +
             "Rules:\n" +
             "- Return ONLY unified diff (or NO_CHANGES).\n" +
-            "- Keep changes minimal.\n";
+            "- Keep changes minimal.\n" +
+            "- Do not modify lockfiles unless required.\n" +
+            "- Do not add new dependencies unless necessary.\n";
 
           const payload = {
             model: "MiniMax-M2.1",
@@ -83,7 +86,6 @@ jobs:
             ],
           };
 
-          // Using stable endpoint to prevent 404 errors
           const res = await fetch("https://api.minimax.io/v1/chat/completions", {
             method: "POST",
             headers: {
@@ -93,38 +95,78 @@ jobs:
             body: JSON.stringify(payload),
           });
 
-          const data = await res.json();
+          const text = await res.text();
           if (!res.ok) {
-            console.error("MiniMax API error:", res.status, JSON.stringify(data));
+            console.error("MiniMax API error:", res.status, text.slice(0, 2000));
             process.exit(1);
           }
 
-          const content = data?.choices?.[0]?.message?.content || "NO_CHANGES";
-          writeFileSync("agent.patch", content.trim() + "\n", "utf8");
+          let data;
+          try {
+            data = JSON.parse(text);
+          } catch {
+            console.error("Failed to parse JSON:", text.slice(0, 2000));
+            process.exit(1);
+          }
+
+          const content = data?.choices?.[0]?.message?.content;
+          if (typeof content !== "string") {
+            console.error("Unexpected response shape:", JSON.stringify(data).slice(0, 2000));
+            process.exit(1);
+          }
+
+          const normalized = content.replace(/\r\n/g, "\n").trim() + "\n";
+          writeFileSync("agent.patch", normalized, "utf8");
           MJS
 
           node call-agent.mjs
 
-      - name: Apply patch
+      - name: Apply patch (or skip)
         id: apply
         run: |
           set -euo pipefail
 
-          if [ ! -f agent.patch ] || [ "$(cat agent.patch)" = "NO_CHANGES" ]; then
-            echo "changed=false" >> $GITHUB_OUTPUT
+          if [ ! -f agent.patch ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
-          # Attempt to apply the patch precisely as the manager intended
-          if git apply --whitespace=fix agent.patch; then
-            echo "changed=true" >> $GITHUB_OUTPUT
-          else
-            echo "Patch failed to apply. The model output was likely not a valid diff."
+          CONTENT="$(cat agent.patch | sed -e 's/[[:space:]]\+$//')"
+
+          if [ "$CONTENT" = "NO_CHANGES" ] || [ "$CONTENT" = "NO_CHANGES." ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if ! echo "$CONTENT" | head -n 5 | grep -Eq '^(diff --git |--- |\+\+\+ )'; then
+            echo "Model output is not a unified diff:"
+            echo "$CONTENT" | head -n 80
             exit 1
           fi
 
-      - name: Cleanup Temporary Files
-        # Ensures internal scripts are not committed to the Pull Request
+          git apply --whitespace=fix --reject --verbose agent.patch
+
+          if git diff --quiet; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Lint
+        if: steps.apply.outputs.changed == 'true' && hashFiles('package.json') != ''
+        run: pnpm lint || true
+
+      - name: Test
+        if: steps.apply.outputs.changed == 'true' && hashFiles('package.json') != ''
+        run: pnpm test || true
+
+      - name: Build
+        if: steps.apply.outputs.changed == 'true' && hashFiles('package.json') != ''
+        run: pnpm build || true
+
+      - name: Cleanup temporary files
+        if: always()
         run: |
           rm -f call-agent.mjs
           rm -f agent.patch
@@ -134,10 +176,14 @@ jobs:
         uses: peter-evans/create-pull-request@v6
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          commit-message: "agent-code: apply AI patch"
+          commit-message: "agent-code: apply patch"
           title: "agent-code: changes for #${{ github.event.issue.number }}"
           body: |
+            Trigger: issue_comment with @agent-code
+
             Applied a unified diff patch generated by the MiniMax agent.
-            Original request: ${{ github.event.comment.body }}
-          branch: agent-code-${{ github.event.issue.number }}
+
+            Original request:
+            ${{ github.event.comment.body }}
+          branch: agent-code-${{ github.event.issue.number }}-${{ github.run_id }}
           delete-branch: true

@@ -127,23 +127,19 @@ jobs:
         run: |
           set -euo pipefail
           
-          # Check if the patch exists and has content
           if [ ! -f agent.patch ] || [ "$(cat agent.patch)" = "NO_CHANGES" ]; then
             echo "changed=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
-          # 1. Apply the AI changes
+          # Apply the AI changes
           git apply --3way --whitespace=fix --verbose agent.patch
 
-          # 2. CLEANUP: Delete agent scripts/patches BEFORE staging
-          # This prevents call-agent.mjs and agent.patch from appearing in the PR
-          rm -f call-agent.mjs agent.patch
+          # CLEANUP: Remove scripts AND the modified lockfile to keep PRs 100% clean
+          rm -f call-agent.mjs agent.patch pnpm-lock.yaml
 
-          # 3. Stage only the intended code changes
           git add .
 
-          # Check if there are actual changes to commit
           if git diff --staged --quiet; then
             echo "changed=false" >> "$GITHUB_OUTPUT"
           else

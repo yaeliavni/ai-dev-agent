@@ -41,7 +41,7 @@ jobs:
             echo "No package.json found. Skipping dependency install."
           fi
 
-      - name: Call AI Agent (request unified diff)
+      - name: Call AI Agent (request full files)
         id: agent
         env:
           AI_BASE_URL: ${{ secrets.AI_BASE_URL }}
@@ -52,13 +52,6 @@ jobs:
           REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-
-          if [ -z "${AI_KEY:-}" ]; then
-            echo "AI_KEY not set. Skipping agent call."
-            echo "changed=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
           cat > call-agent.mjs <<'MJS'
           import { writeFileSync } from "node:fs";
 
@@ -66,20 +59,13 @@ jobs:
           const baseUrl = process.env.AI_BASE_URL;
           const model = process.env.AI_MODEL;
 
-          const system =
-            "You are a senior code-change agent. " +
-            "Output a valid unified diff in git format. " +
-            "For existing files use: --- a/file and +++ b/file " +
-            "For new files use: --- /dev/null and +++ b/file " +
-            "Include proper @@ hunk headers. " +
-            "NO markdown fences, NO backticks, NO explanations. " +
-            "If no change needed, output: NO_CHANGES";
+          const system = 
+            "You are a senior code agent. " +
+            "Output your changes in this exact format for each file: " +
+            "FILE: path/to/file.ext\nCONTENT:\n[Full file content here]\nEND_FILE\n" +
+            "NO markdown fences, NO explanations. Just the files.";
 
-          const user =
-            `Repo: ${process.env.REPO}\n` +
-            `Issue: #${process.env.ISSUE_NUMBER}\n` +
-            `Request:\n${process.env.COMMENT_BODY}\n\n` +
-            "Return ONLY a unified diff or NO_CHANGES.";
+          const user = `Repo: ${process.env.REPO}\nIssue: #${process.env.ISSUE_NUMBER}\nRequest:\n${process.env.COMMENT_BODY}`;
 
           const res = await fetch(`${baseUrl}/chat/completions`, {
             method: "POST",
@@ -98,19 +84,9 @@ jobs:
           });
 
           const data = await res.json();
-          let content = data?.choices?.[0]?.message?.content || "NO_CHANGES";
-          
-          // ADVANCED CLEANING: Claude's fix + removing common AI conversational filler
-          content = content
-            .replace(/```[a-z]*\s*\n/g, "") // Removes starting fences
-            .replace(/```\s*$/g, "")       // Removes ending fences
-            .replace(/^(Certainly|Here is|I have).*\n/gi, "") // Removes conversational preamble
-            .replace(/\r\n/g, "\n")
-            .trim();
-
-          writeFileSync("agent.patch", content + "\n", "utf8");
+          let content = data?.choices?.[0]?.message?.content || "";
+          writeFileSync("agent.output", content, "utf8");
           MJS
-
           node call-agent.mjs
 
       - name: Debug patch (Claude's Suggestion)
@@ -126,35 +102,43 @@ jobs:
         id: apply
         run: |
           set -euo pipefail
-          if [ ! -f agent.patch ]; then
+          
+          # Check for the AI output file instead of a .patch file
+          if [ ! -f agent.output ]; then
             echo "changed=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
-          # 1. Attempt robust apply
-          # --recount: Fixes 'corrupt patch' by recalculating hunk headers
-          # --ignore-whitespace: Fixes the 'trailing whitespace' errors
-          if git apply --3way --ignore-space-change --ignore-whitespace --recount agent.patch; then
-            echo "Patch applied successfully via standard method."
-          else
-            echo "Standard apply failed. Attempting fallback apply..."
-            # Fallback: Allow partial application if one file is corrupt but others aren't
-            git apply --recount --reject agent.patch || true
-          fi
+          # Robust Parser: This replaces 'git apply'
+          # It reads the FILE/CONTENT/END_FILE markers and writes files directly.
+          # It also handles directory creation for multi-file requests.
+          awk '
+            /^FILE: / { 
+                file=$2; 
+                split(file, parts, "/");
+                dir="";
+                for (i=1; i<length(parts); i++) {
+                    dir = (dir == "" ? parts[i] : dir "/" parts[i]);
+                }
+                if (dir != "") system("mkdir -p " dir);
+                next 
+            }
+            /^CONTENT:/ { writing=1; next }
+            /^END_FILE/ { writing=0; close(file); next }
+            writing { print $0 > file }
+          ' agent.output
 
-          # 2. CLEANUP: Delete scripts BEFORE staging to keep PRs pristine
-          rm -f call-agent.mjs agent.patch pnpm-lock.yaml
-
-          # 3. Stage changes
+          # CLEANUP: Remove technical files before staging to keep the PR pristine
+          rm -f call-agent.mjs agent.output pnpm-lock.yaml
+          
           git add .
 
-          # 4. Final verification
+          # Verify if any changes were actually made
           if [ -n "$(git status --porcelain)" ]; then
             echo "changed=true" >> "$GITHUB_OUTPUT"
           else
-            echo "No changes detected to stage."
+            echo "No changes detected."
             echo "changed=false" >> "$GITHUB_OUTPUT"
-            exit 1 # Forces a RED status if no PR can be made
           fi
 
       - name: Create Pull Request

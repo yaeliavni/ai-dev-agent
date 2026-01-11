@@ -1,19 +1,33 @@
-# ai-dev-agent
-I’ve finished setting up the infrastructure for the autonomous developer agent. 
+# Dev-Agent: MiniMax + OpenHands
 
-### 1. What’s implemented:
-* **Event Trigger:** The agent is fully integrated with GitHub Actions. It listens specifically for `@agent` comments on any issue.
-* **Interleaved Thinking Parser:** I’ve added logic to extract the `<think>` tags from MiniMax. This allows the team to see the agent's internal reasoning directly in the GitHub thread before it makes changes.
-* **Automated Git Flow:** The script handles the full lifecycle: creating a dedicated branch, committing code fixes, and opening a Pull Request (PR) for human review.
-* **Simulation Mode:** I've verified the "plumbing" using a simulation script. The PR creation and commenting system are working perfectly.
+A cloud-native bridge that turns GitHub Issues into Pull Requests using **MiniMax M2.1**. 
 
-### 2. Repo Structure:
-* `.github/workflows/agent.yml`: The automation trigger.
-* `agent_logic.py`: The core bridge script (clean, documented, and modular).
-* `.openhands/microagents/repo.md`: Instructions for repo-specific coding standards.
+Instead of running agents locally on your laptop, this setup lives in GitHub Actions. It stays on standby and "wakes up" when called, thinks through the problem, and either pushes a fix or asks for more info. You just `git pull` the result once the PR is ready.
 
-### 3. Final Steps:
-The system is currently in "Simulation Mode" to prevent errors. To go live, we just need to:
- **API Key:** Add the `MINIMAX_API_KEY` to the GitHub Secrets.
+### How it works
+Everything happens in the GitHub cloud:
+1. **Trigger:** Open a **GitHub Issue** and comment `@agent <instruction>`.
+2. **Reasoning:** The agent uses MiniMax's "Interleaved Thinking" to plan the fix and posts its logic as a comment.
+3. **Action/Query:** The agent will either open a **Pull Request** or, if the task is unclear, ask you a follow-up question.
 
+### Tech Stack
+* **LLM:** MiniMax M2.1 (Optimized for reasoning and multi-language coding)
+* **Automation:** GitHub Actions (Ubuntu runner)
+* **Ops:** PyGithub for repo management
 
+### Project Structure
+* `.github/workflows/agent.yml` – The "ears" (listens for `@agent` triggers).
+* `agent_logic.py` – The bridge (talks to MiniMax and handles Git logic).
+* `.openhands/microagents/repo.md` – Repo-specific coding standards for the AI to follow.
+
+### Setup & Installation
+If you're setting this up for a new repo:
+
+1. **GitHub Secrets:** Add these under **Settings > Secrets and variables > Actions**:
+   * `MINIMAX_API_KEY`: Your key from MiniMax Open Platform.
+   * `MY_GITHUB_TOKEN`: A Personal Access Token (PAT) with `repo` and `workflow` scopes.
+
+2. **Permissions:**
+   Go to **Settings > Actions > General**. 
+   * Set **Workflow permissions** to "Read and write permissions".
+   * Check **"Allow GitHub Actions to create and approve pull requests"**.

@@ -1,0 +1,21 @@
+name: AI Agent Trigger
+on:
+  issue_comment:
+    types: [created]
+
+jobs:
+  run-agent:
+    # הפקודה תרוץ רק אם התגובה מכילה את המילה @agent
+    if: contains(github.event.comment.body, '@agent')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: OpenHands Placeholder
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.LLM_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.MY_GITHUB_TOKEN }}
+        run: |
+          echo "הסוכן זוהה בהצלחה!"
+          echo "ההוראה שנשלחה: ${{ github.event.comment.body }}"

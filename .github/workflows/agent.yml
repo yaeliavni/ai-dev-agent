@@ -14,7 +14,6 @@ concurrency:
 
 jobs:
   run-agent:
-    # Only runs if the comment contains @agent-code
     if: contains(github.event.comment.body, '@agent-code')
     runs-on: ubuntu-latest
 
@@ -34,14 +33,15 @@ jobs:
         with:
           version: 9
 
-      - name: Install dependencies
+      - name: Install dependencies (best-effort)
         run: |
-          if [ ! -f package.json ]; then
-            echo '{"name":"agent-project"}' > package.json
+          if [ -f package.json ]; then
+            pnpm install --frozen-lockfile || pnpm install
+          else
+            echo "No package.json found. Skipping dependency install."
           fi
-          pnpm install
 
-      - name: Call AI Agent
+      - name: Call AI Agent (request unified diff)
         id: agent
         env:
           AI_BASE_URL: ${{ secrets.AI_BASE_URL }}
@@ -52,68 +52,135 @@ jobs:
           REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
+
+          if [ -z "${AI_KEY:-}" ]; then
+            echo "AI_KEY not set. Skipping agent call."
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
           cat > call-agent.mjs <<'MJS'
           import { writeFileSync } from "node:fs";
-          
+
           const apiKey = process.env.AI_KEY;
           const baseUrl = process.env.AI_BASE_URL;
           const model = process.env.AI_MODEL;
 
+          const system =
+            "You are a senior code-change agent inside a Git repo. " +
+            "Output a valid unified diff in git format. " +
+            "For existing files use: --- a/file and +++ b/file " +
+            "For new files use: --- /dev/null and +++ b/file " +
+            "Include proper @@ hunk headers. " +
+            "No explanations, no markdown fences. " +
+            "If no change needed, output: NO_CHANGES";
+
+          const user =
+            `Repo: ${process.env.REPO}\n` +
+            `Issue: #${process.env.ISSUE_NUMBER}\n` +
+            `Request:\n${process.env.COMMENT_BODY}\n\n` +
+            "Return ONLY a unified diff or NO_CHANGES.";
+
+          const payload = {
+            model,
+            messages: [
+              { role: "system", content: system },
+              { role: "user", content: user },
+            ],
+          };
+
           const res = await fetch(`${baseUrl}/chat/completions`, {
             method: "POST",
             headers: {
-              "Authorization": `Bearer ${apiKey}`,
+              Authorization: `Bearer ${apiKey}`,
               "Content-Type": "application/json",
             },
-            body: JSON.stringify({
-              model: model,
-              messages: [
-                { 
-                  role: "system", 
-                  content: "You are a senior engineer. Output ONLY a raw unified diff patch. No markdown fences, no backticks, no explanations." 
-                },
-                { role: "user", content: process.env.COMMENT_BODY }
-              ],
-              temperature: 0.2
-            }),
+            body: JSON.stringify(payload),
           });
 
-          const data = await res.json();
-          let content = data?.choices?.[0]?.message?.content || "NO_CHANGES";
-          
-          // CLEANING: This removes markdown fences (```diff) that cause the 'corrupt patch' error
-          content = content.replace(/```[a-z]*\n/g, "").replace(/```/g, "").trim();
-          
-          writeFileSync("agent.patch", content + "\n", "utf8");
+          const text = await res.text();
+          if (!res.ok) {
+            console.error("AI API error:", res.status, text.slice(0, 2000));
+            process.exit(1);
+          }
+
+          let data;
+          try {
+            data = JSON.parse(text);
+          } catch {
+            console.error("Failed to parse JSON:", text.slice(0, 2000));
+            process.exit(1);
+          }
+
+          const content = data?.choices?.[0]?.message?.content || "NO_CHANGES";
+          writeFileSync("agent.patch", content.replace(/\r\n/g,"\n").trim() + "\n", "utf8");
           MJS
+
           node call-agent.mjs
 
-      - name: Apply patch
+      - name: Apply patch (or skip)
         id: apply
         run: |
-          if [ ! -f agent.patch ] || [ "$(cat agent.patch)" = "NO_CHANGES" ]; then
+          set -euo pipefail
+
+          if [ ! -f agent.patch ]; then
             echo "changed=false" >> "$GITHUB_OUTPUT"
-          else
-            # --3way and --whitespace=fix make the agent much more resilient to AI formatting
-            if git apply --3way --whitespace=fix agent.patch; then
-              echo "changed=true" >> "$GITHUB_OUTPUT"
-            else
-              echo "Patch failed to apply cleanly."
-              exit 1
-            fi
+            exit 0
           fi
 
-      - name: Cleanup
+          CONTENT="$(cat agent.patch | sed -e 's/[[:space:]]\+$//')"
+
+          if [ "$CONTENT" = "NO_CHANGES" ] || [ "$CONTENT" = "NO_CHANGES." ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if ! echo "$CONTENT" | head -n 5 | grep -Eq '^(diff --git |--- |\+\+\+ )'; then
+            echo "Model output is not a unified diff:"
+            cat agent.patch
+            exit 1
+          fi
+
+          git apply --whitespace=fix --verbose agent.patch
+
+          if git diff --quiet; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Lint
+        if: steps.apply.outputs.changed == 'true' && hashFiles('package.json') != ''
+        run: pnpm lint || true
+
+      - name: Test
+        if: steps.apply.outputs.changed == 'true' && hashFiles('package.json') != ''
+        run: pnpm test || true
+
+      - name: Build
+        if: steps.apply.outputs.changed == 'true' && hashFiles('package.json') != ''
+        run: pnpm build || true
+
+      - name: Cleanup temporary files
         if: always()
-        run: rm -f call-agent.mjs agent.patch
+        run: |
+          rm -f call-agent.mjs
+          rm -f agent.patch
 
       - name: Create Pull Request
         if: steps.apply.outputs.changed == 'true'
         uses: peter-evans/create-pull-request@v6
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          commit-message: "agent-code: update from #${{ github.event.issue.number }}"
+          commit-message: "agent-code: apply patch"
           title: "agent-code: changes for #${{ github.event.issue.number }}"
-          body: "Applied AI patch based on request: ${{ github.event.comment.body }}"
-          branch: agent-code-${{ github.event.issue.number }}
+          body: |
+            Trigger: issue_comment with @agent-code
+
+            Applied a unified diff patch generated by the AI agent.
+
+            Original request:
+            ${{ github.event.comment.body }}
+          branch: agent-code-${{ github.event.issue.number }}-${{ github.run_id }}
           delete-branch: true

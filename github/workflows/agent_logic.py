@@ -9,6 +9,20 @@ comment_body = os.getenv("COMMENT_BODY")
 issue_number = int(os.getenv("ISSUE_NUMBER"))
 repo_name = os.getenv("REPO_NAME")
 
+def extract_thinking_and_respond(issue, raw_response):
+    # חיפוש תגיות המחשבה של MiniMax
+    if "<think>" in raw_response:
+        parts = raw_response.split("<think>")
+        # החלק שאחרי תגית הפתיחה ולפני תגית הסגירה
+        thought_content = parts[1].split("</think>")[0]
+        # החלק שנשאר הוא הקוד או התשובה הסופית
+        final_answer = parts[1].split("</think>")[1]
+        
+        # פרסום המחשבה בתגובה בגיטהאב
+        issue.create_comment(f"🧠 **תהליך החשיבה של הסוכן:**\n> {thought_content.strip()}")
+        return final_answer.strip()
+    return raw_response
+
 def create_pull_request(repo, branch_name, file_path, new_content):
     # 1. יצירת ענף (Branch) חדש
     main_branch = repo.get_branch("main")

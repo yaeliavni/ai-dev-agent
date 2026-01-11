@@ -5,37 +5,41 @@ on:
 
 jobs:
   run-agent:
-    # Only wake up if someone tags @agent
+    # Only run if someone tags @agent in a comment
     if: contains(github.event.comment.body, '@agent')
     runs-on: ubuntu-latest
     
     steps:
-      # 1. Standard checkout
+      # 1. Standard checkout to get the repo files
       - name: Checkout repo
         uses: actions/checkout@v4
 
-      # 2. Get the answer from MiniMax
+      # 2. Call MiniMax using OpenAI-compatible API
       - name: Call MiniMax
         id: minimax
         run: |
+          # We send the instructions (System Prompt) and the user request in one call
           RESPONSE=$(curl https://api.minimax.io/v1/text/chat/completions_pro \
             -H "Authorization: Bearer ${{ secrets.MINIMAX_API_KEY }}" \
             -H "Content-Type: application/json" \
             -d '{
               "model": "MiniMax-M2.1",
-              "messages": [{"role": "user", "content": "${{ github.event.comment.body }}"}]
+              "messages": [
+                {"role": "system", "content": "You are a dev agent. If you want to change a file, use format: file: <path> content: <code>. Be concise."},
+                {"role": "user", "content": "${{ github.event.comment.body }}"}
+              ]
             }')
           
-          # Just grab the final result
+          # Extract only the text answer
           RESULT=$(echo $RESPONSE | jq -r '.choices[0].message.content')
           echo "ai_output=$RESULT" >> $GITHUB_OUTPUT
 
-      # 3. Open the PR with the AI changes
+      # 3. Create Pull Request using a standard community Action
       - name: Create Pull Request
         uses: peter-evans/create-pull-request@v6
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          commit-message: "AI update"
+          commit-message: "AI update from MiniMax"
           title: "AI Suggestion for Issue #${{ github.event.issue.number }}"
-          body: "AI Response: ${{ steps.minimax.outputs.ai_output }}"
+          body: "AI generated this change. Response: ${{ steps.minimax.outputs.ai_output }}"
           branch: ai-fix-${{ github.event.issue.number }}

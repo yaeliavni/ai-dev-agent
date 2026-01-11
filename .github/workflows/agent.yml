@@ -118,7 +118,10 @@ jobs:
           echo "=== PATCH CONTENT START ==="
           cat agent.patch || echo "No patch file found"
           echo "=== PATCH CONTENT END ==="
-
+      - name: Configure Git
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
       - name: Apply patch (or skip)
         id: apply
         run: |

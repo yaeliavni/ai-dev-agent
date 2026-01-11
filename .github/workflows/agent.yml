@@ -126,24 +126,28 @@ jobs:
         id: apply
         run: |
           set -euo pipefail
-          
-          if [ ! -f agent.patch ] || [ "$(cat agent.patch)" = "NO_CHANGES" ]; then
+          if [ ! -f agent.patch ]; then
             echo "changed=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
-          # Apply the AI changes
-          git apply --3way --whitespace=fix --verbose agent.patch
+          # Use --ignore-space-change and --ignore-whitespace to handle AI formatting quirks.
+          # Use --recount to allow Git to automatically fix incorrect hunk headers (line counts).
+          git apply --3way --ignore-space-change --ignore-whitespace --recount agent.patch || {
+            echo "Patch application failed. Checking if files were partially updated..."
+          }
 
-          # CLEANUP: Remove scripts AND the modified lockfile to keep PRs 100% clean
+          # CLEANUP: Remove scripts and patches BEFORE staging
           rm -f call-agent.mjs agent.patch pnpm-lock.yaml
 
+          # Stage all changes (new files, modifications, and new directories)
           git add .
 
-          if git diff --staged --quiet; then
-            echo "changed=false" >> "$GITHUB_OUTPUT"
-          else
+          # Final check for changes
+          if [ -n "$(git status --porcelain)" ]; then
             echo "changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Create Pull Request

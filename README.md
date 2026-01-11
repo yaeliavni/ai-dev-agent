@@ -1,7 +1,5 @@
 # ai-dev-agent
-# Project Update: Autonomous Dev-Agent POC (MiniMax M2.1)
-
-I’ve finished setting up the infrastructure for the autonomous developer agent. The goal was to create a "hands-off" bridge between GitHub issues and the MiniMax M2.1 model.
+I’ve finished setting up the infrastructure for the autonomous developer agent. 
 
 ### 1. What’s implemented:
 * **Event Trigger:** The agent is fully integrated with GitHub Actions. It listens specifically for `@agent` comments on any issue.

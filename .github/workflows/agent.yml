@@ -44,9 +44,9 @@ jobs:
       - name: Call AI Agent (request unified diff)
         id: agent
         env:
-          AI_BASE_URL: ${{ secrets.AI_BASE_URL }}           # e.g., https://api.minimax.io/v1
-          AI_MODEL: ${{ secrets.AI_MODEL }}                 # e.g., MiniMax-M2.1 or GPT-4
-          AI_KEY: ${{ secrets.AI_KEY }}                     # Temporary or real key
+          AI_BASE_URL: ${{ secrets.AI_BASE_URL }}
+          AI_MODEL: ${{ secrets.AI_MODEL }}
+          AI_KEY: ${{ secrets.AI_KEY }}
           COMMENT_BODY: ${{ github.event.comment.body }}
           ISSUE_NUMBER: ${{ github.event.issue.number }}
           REPO: ${{ github.repository }}
@@ -60,23 +60,55 @@ jobs:
           fi
 
           cat > call-agent.mjs <<'MJS'
-          import { writeFileSync } from "node:fs";
+          import { writeFileSync, readFileSync, readdirSync } from "node:fs";
+          import { join } from "node:path";
 
           const apiKey = process.env.AI_KEY;
           const baseUrl = process.env.AI_BASE_URL;
           const model = process.env.AI_MODEL;
 
+          // Gather repository context
+          function gatherContext() {
+            const context = [];
+            
+            try {
+              // Add file tree (limit depth)
+              const files = readdirSync(".", { recursive: true, withFileTypes: true })
+                .filter(d => !d.name.startsWith(".") && !d.name.includes("node_modules"))
+                .slice(0, 100)
+                .map(d => d.isDirectory() ? `${d.name}/` : d.name);
+              
+              context.push("Repository structure:");
+              context.push(files.join("\n"));
+            } catch (e) {
+              context.push("(Could not read repository structure)");
+            }
+
+            return context.join("\n");
+          }
+
+          const repoContext = gatherContext();
+
           const system =
-            "You are a senior code-change agent inside a Git repo. Output MUST be a single unified diff (git-style). " +
-            "No explanations, no markdown, no code fences. If no change is needed, output exactly: NO_CHANGES.";
+            "You are a senior software engineer making targeted code changes. " +
+            "You MUST output ONLY a valid unified diff in git format. " +
+            "Requirements:\n" +
+            "- Start with 'diff --git a/filename b/filename'\n" +
+            "- Include '--- a/filename' and '+++ b/filename' headers\n" +
+            "- Use proper hunk headers: @@ -start,count +start,count @@\n" +
+            "- Lines starting with '-' are removed, '+' are added, ' ' (space) are context\n" +
+            "- NO markdown, NO explanations, NO code fences (```), NO preamble\n" +
+            "- If no changes needed, output exactly: NO_CHANGES\n" +
+            "- For new files, use '--- /dev/null' and '+++ b/filename'\n" +
+            "- Ensure proper line endings (LF only, no CRLF)";
 
           const user =
-            `Repo: ${process.env.REPO}\n` +
-            `Issue: #${process.env.ISSUE_NUMBER}\n` +
-            `Request:\n${process.env.COMMENT_BODY}\n\n` +
-            "Rules:\n" +
-            "- Return ONLY unified diff (or NO_CHANGES).\n" +
-            "- Keep changes minimal.\n";
+            `Repository: ${process.env.REPO}\n` +
+            `Issue: #${process.env.ISSUE_NUMBER}\n\n` +
+            `${repoContext}\n\n` +
+            `User request:\n${process.env.COMMENT_BODY}\n\n` +
+            `Generate a unified diff patch that implements this request. ` +
+            `Remember: output ONLY the diff or NO_CHANGES.`;
 
           const payload = {
             model,
@@ -84,6 +116,7 @@ jobs:
               { role: "system", content: system },
               { role: "user", content: user },
             ],
+            temperature: 0.3,
           };
 
           const res = await fetch(`${baseUrl}/chat/completions`, {
@@ -109,13 +142,25 @@ jobs:
             process.exit(1);
           }
 
-          const content = data?.choices?.[0]?.message?.content || "NO_CHANGES";
-          writeFileSync("agent.patch", content.replace(/\r\n/g,"\n").trim() + "\n", "utf8");
+          let content = data?.choices?.[0]?.message?.content || "NO_CHANGES";
+          
+          // Clean the content
+          content = content
+            .replace(/\r\n/g, "\n")  // Normalize line endings
+            .replace(/^```[a-z]*\n/gm, "")  // Remove markdown code fences
+            .replace(/\n```$/gm, "")
+            .trim();
+
+          writeFileSync("agent.patch", content + "\n", "utf8");
+          
+          // Debug output
+          console.log("Generated patch (first 50 lines):");
+          console.log(content.split("\n").slice(0, 50).join("\n"));
           MJS
 
           node call-agent.mjs
 
-      - name: Apply patch (or skip)
+      - name: Validate and apply patch
         id: apply
         run: |
           set -euo pipefail
@@ -127,25 +172,59 @@ jobs:
 
           CONTENT="$(cat agent.patch | sed -e 's/[[:space:]]\+$//')"
 
+          # Check for NO_CHANGES
           if [ "$CONTENT" = "NO_CHANGES" ] || [ "$CONTENT" = "NO_CHANGES." ]; then
+            echo "Agent reported no changes needed."
             echo "changed=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
-          if ! echo "$CONTENT" | head -n 5 | grep -Eq '^(diff --git |--- |\+\+\+ )'; then
-            echo "Model output is not a unified diff:"
+          # Validate it's a unified diff
+          if ! echo "$CONTENT" | head -n 10 | grep -Eq '^(diff --git |--- |\+\+\+ )'; then
+            echo "ERROR: Model output is not a valid unified diff."
+            echo "Expected format: diff --git a/file b/file"
+            echo ""
+            echo "Actual output (first 80 lines):"
+            echo "$CONTENT" | head -n 80
+            echo ""
+            echo "HINT: The model may need a clearer prompt or different temperature setting."
+            exit 1
+          fi
+
+          # Additional validation: check for proper hunk headers
+          if ! echo "$CONTENT" | grep -Eq '^@@.*@@'; then
+            echo "ERROR: Patch missing hunk headers (@@)"
+            echo "Output:"
             echo "$CONTENT" | head -n 80
             exit 1
           fi
 
-          git apply --whitespace=fix --reject --verbose agent.patch
+          echo "Patch validation passed. Applying..."
+          echo ""
+          
+          # Try to apply the patch
+          if git apply --check --verbose agent.patch 2>&1; then
+            git apply --whitespace=fix agent.patch
+          else
+            echo ""
+            echo "ERROR: Patch failed validation. Full patch content:"
+            cat agent.patch
+            exit 1
+          fi
 
+          # Check if anything actually changed
           if git diff --quiet; then
+            echo "Patch applied but resulted in no changes."
             echo "changed=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
           echo "changed=true" >> "$GITHUB_OUTPUT"
+          
+          # Show what changed
+          echo ""
+          echo "Changes applied:"
+          git diff --stat
 
       - name: Lint
         if: steps.apply.outputs.changed == 'true' && hashFiles('package.json') != ''
@@ -170,14 +249,23 @@ jobs:
         uses: peter-evans/create-pull-request@v6
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          commit-message: "agent-code: apply patch"
-          title: "agent-code: changes for #${{ github.event.issue.number }}"
+          commit-message: "agent-code: apply changes for #${{ github.event.issue.number }}"
+          title: "agent-code: #${{ github.event.issue.number }}"
           body: |
-            Trigger: issue_comment with @agent-code
-
-            Applied a unified diff patch generated by the AI agent.
-
-            Original request:
+            ## AI Agent Changes
+            
+            **Triggered by:** @agent-code comment in issue #${{ github.event.issue.number }}
+            
+            **Original request:**
+            ```
             ${{ github.event.comment.body }}
+            ```
+            
+            **Model used:** ${{ secrets.AI_MODEL }}
+            
+            ---
+            
+            This PR was automatically generated by the agent-code workflow.
+            Please review the changes carefully before merging.
           branch: agent-code-${{ github.event.issue.number }}-${{ github.run_id }}
           delete-branch: true

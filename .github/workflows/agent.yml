@@ -5,20 +5,20 @@ on:
 
 jobs:
   run-agent:
-    # Only run if someone tags @agent in a comment
+    # Trigger the workflow only if '@agent' is mentioned in a comment
     if: contains(github.event.comment.body, '@agent')
     runs-on: ubuntu-latest
     
     steps:
-      # 1. Standard checkout to get the repo files
+      # 1. Download the repository content
       - name: Checkout repo
         uses: actions/checkout@v4
 
-      # 2. Call MiniMax or Run Simulation
+      # 2. Communicate with MiniMax AI (URL updated to fix 404 error)
       - name: Call MiniMax
         id: minimax
         run: |
-          RESPONSE=$(curl -s https://api.minimax.io/v1/text/chat/completions_pro \
+          RESPONSE=$(curl -s https://api.minimax.io/v1/chat/completions \
             -H "Authorization: Bearer ${{ secrets.MINIMAX_API_KEY }}" \
             -H "Content-Type: application/json" \
             -d '{
@@ -29,13 +29,18 @@ jobs:
               ]
             }')
           
-          # הדפסת התשובה ללוג כדי שנוכל לראות מה קרה
+          # Print the raw response for debugging purposes in the Actions log
           echo "Debug: API Response is: $RESPONSE"
           
+          # Extract the AI's content from the JSON response
           RESULT=$(echo $RESPONSE | jq -r '.choices[0].message.content // "ERROR"')
-          echo "ai_output=$RESULT" >> $GITHUB_OUTPUT
+          
+          # Set the output variable using EOF to handle multi-line code properly
+          echo "ai_output<<EOF" >> $GITHUB_OUTPUT
+          echo -e "$RESULT" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
 
-      # 3. Create Pull Request using a standard community Action
+      # 3. Automatically create a Pull Request with the AI's suggested changes
       - name: Create Pull Request
         uses: peter-evans/create-pull-request@v6
         with:

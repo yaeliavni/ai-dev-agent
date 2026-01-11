@@ -131,28 +131,30 @@ jobs:
             exit 0
           fi
 
-          # Use --recount to fix the "corrupt patch" line count errors
-          # Use --ignore-whitespace to handle AI formatting issues
+          # 1. Attempt robust apply
+          # --recount: Fixes 'corrupt patch' by recalculating hunk headers
+          # --ignore-whitespace: Fixes the 'trailing whitespace' errors
           if git apply --3way --ignore-space-change --ignore-whitespace --recount agent.patch; then
-            echo "Patch applied successfully"
+            echo "Patch applied successfully via standard method."
           else
-            echo "Standard apply failed. Forcing a rough apply..."
-            # Fallback: try to apply while ignoring as much formatting as possible
-            git apply --reject --whitespace=fix agent.patch || true
+            echo "Standard apply failed. Attempting fallback apply..."
+            # Fallback: Allow partial application if one file is corrupt but others aren't
+            git apply --recount --reject agent.patch || true
           fi
 
-          # CLEANUP: Remove scripts BEFORE staging so they aren't in the PR
+          # 2. CLEANUP: Delete scripts BEFORE staging to keep PRs pristine
           rm -f call-agent.mjs agent.patch pnpm-lock.yaml
-          
+
+          # 3. Stage changes
           git add .
 
-          # Check if we actually have changes staged
+          # 4. Final verification
           if [ -n "$(git status --porcelain)" ]; then
             echo "changed=true" >> "$GITHUB_OUTPUT"
           else
             echo "No changes detected to stage."
             echo "changed=false" >> "$GITHUB_OUTPUT"
-            exit 1 # Fail the step so you know why the PR wasn't created
+            exit 1 # Forces a RED status if no PR can be made
           fi
 
       - name: Create Pull Request

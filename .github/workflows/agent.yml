@@ -1,55 +1,179 @@
-name: MiniMax Cloud Agent
+name: Agent Code (Diff -> PR)
+
 on:
   issue_comment:
     types: [created]
 
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: agent-code-${{ github.event.issue.number }}
+  cancel-in-progress: true
+
 jobs:
   run-agent:
-    # Trigger the workflow only if '@agent' is mentioned in a comment
-    if: contains(github.event.comment.body, '@agent')
+    # Triggered by @agent-code instead of @agent
+    if: contains(github.event.comment.body, '@agent-code')
     runs-on: ubuntu-latest
-    
+
     steps:
-      # 1. Download the repository content
       - name: Checkout repo
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      # 2. Communicate with MiniMax AI and write changes to the file
-      - name: Call MiniMax
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Install dependencies
+        # Note: This will fail if you don't have a package.json file
+        run: pnpm install --frozen-lockfile
+
+      - name: Call MiniMax (request unified diff)
         id: minimax
+        env:
+          MINIMAX_API_KEY: ${{ secrets.MINIMAX_API_KEY }}
+          COMMENT_BODY: ${{ github.event.comment.body }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          REPO: ${{ github.repository }}
         run: |
-          RESPONSE=$(curl -s https://api.minimax.io/v1/chat/completions \
-            -H "Authorization: Bearer ${{ secrets.MINIMAX_API_KEY }}" \
-            -H "Content-Type: application/json" \
-            -d '{
-              "model": "MiniMax-M2.1",
-              "messages": [
-                {"role": "system", "content": "You are a dev agent. Just provide the text for a new README.md file based on the user request. Do not include markdown code fences, just raw text."},
-                {"role": "user", "content": "${{ github.event.comment.body }}"}
-              ]
-            }')
-          
-          # Debug: Show the API response in the logs
-          echo "Debug: API Response is: $RESPONSE"
-          
-          # Extract the AI's response content
-          RESULT=$(echo $RESPONSE | jq -r '.choices[0].message.content // "ERROR"')
-          
-          # CRITICAL: This line overwrites the README.md file with the AI's output
-          # Without this, GitHub sees no changes and won't create a Pull Request.
-          echo -e "$RESULT" > README.md
-          
-          # Set the output variable for the next step
-          echo "ai_output<<EOF" >> $GITHUB_OUTPUT
-          echo -e "$RESULT" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
+          set -euo pipefail
 
-      # 3. Automatically create a Pull Request because the README.md has changed
+          cat > call-agent.mjs <<'MJS'
+          import { writeFileSync } from "node:fs";
+
+          const apiKey = process.env.MINIMAX_API_KEY;
+          if (!apiKey) {
+            console.error("Missing MINIMAX_API_KEY secret.");
+            process.exit(1);
+          }
+
+          const system =
+            "You are a senior code-change agent operating inside a Git repo. " +
+            "Output MUST be a single unified diff patch only (git-style). " +
+            "No explanations, no markdown, no code fences. " +
+            "If no change is needed, output exactly: NO_CHANGES.";
+
+          const user =
+            `Repo: ${process.env.REPO}\n` +
+            `Issue: #${process.env.ISSUE_NUMBER}\n` +
+            `Request:\n${process.env.COMMENT_BODY}\n\n` +
+            "Rules:\n" +
+            "- Return ONLY unified diff (or NO_CHANGES).\n" +
+            "- Keep changes minimal.\n" +
+            "- Do not modify lockfiles unless required.\n" +
+            "- Do not add new dependencies unless necessary.\n";
+
+          const payload = {
+            model: "MiniMax-M2.1",
+            messages: [
+              { role: "system", content: system },
+              { role: "user", content: user },
+            ],
+          };
+
+          const res = await fetch("https://api.minimax.io/v1/text/chat/completions_pro", {
+            method: "POST",
+            headers: {
+              Authorization: `Bearer ${apiKey}`,
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify(payload),
+          });
+
+          const text = await res.text();
+          if (!res.ok) {
+            console.error("MiniMax API error:", res.status, text.slice(0, 2000));
+            process.exit(1);
+          }
+
+          let data;
+          try {
+            data = JSON.parse(text);
+          } catch {
+            console.error("Failed to parse JSON response:", text.slice(0, 2000));
+            process.exit(1);
+          }
+
+          const content = data?.choices?.[0]?.message?.content;
+          if (typeof content !== "string") {
+            console.error("Unexpected response shape:", JSON.stringify(data).slice(0, 2000));
+            process.exit(1);
+          }
+
+          const normalized = content.replace(/\r\n/g, "\n").trim() + "\n";
+          writeFileSync("agent_output.txt", normalized, "utf8");
+
+          const ghOut = process.env.GITHUB_OUTPUT;
+          if (!ghOut) {
+            console.error("Missing GITHUB_OUTPUT.");
+            process.exit(1);
+          }
+          writeFileSync(ghOut, `ai_output_path=agent_output.txt\n`, { flag: "a" });
+          MJS
+
+          node call-agent.mjs
+
+      - name: Apply patch (or skip)
+        id: apply
+        run: |
+          set -euo pipefail
+
+          OUT="${{ steps.minimax.outputs.ai_output_path }}"
+          CONTENT="$(cat "$OUT" | sed -e 's/[[:space:]]\+$//')"
+
+          if [ "$CONTENT" = "NO_CHANGES." ] || [ "$CONTENT" = "NO_CHANGES" ]; then
+            echo "changed=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          if ! echo "$CONTENT" | head -n 5 | grep -Eq '^(diff --git |--- |\+\+\+ )'; then
+            echo "Model output is not a unified diff. Failing."
+            echo "$CONTENT" | head -n 80
+            exit 1
+          fi
+
+          echo "$CONTENT" > agent.patch
+          git apply --whitespace=fix --reject --verbose agent.patch
+
+          if git diff --quiet; then
+            echo "No actual diff after applying patch."
+            echo "changed=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          echo "changed=true" >> $GITHUB_OUTPUT
+
+      - name: Lint
+        if: steps.apply.outputs.changed == 'true'
+        run: pnpm lint
+
+      - name: Test
+        if: steps.apply.outputs.changed == 'true'
+        run: pnpm test
+
+      - name: Build
+        if: steps.apply.outputs.changed == 'true'
+        run: pnpm build
+
       - name: Create Pull Request
+        if: steps.apply.outputs.changed == 'true'
         uses: peter-evans/create-pull-request@v6
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          commit-message: "AI update from MiniMax"
-          title: "AI Suggestion for Issue #${{ github.event.issue.number }}"
-          body: "AI generated this change based on your request."
-          branch: ai-fix-${{ github.event.issue.number }}
+          commit-message: "agent-code: apply patch"
+          title: "agent-code: changes for #${{ github.event.issue.number }}"
+          body: |
+            Trigger: issue_comment with @agent-code
+            Applied a unified diff patch generated by the agent.
+          branch: agent-code-${{ github.event.issue.number }}-${{ github.run_id }}
+          delete-branch: true

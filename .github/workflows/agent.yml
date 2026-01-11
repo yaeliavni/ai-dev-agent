@@ -97,7 +97,13 @@ jobs:
           set -euo pipefail
           OUT="${{ steps.minimax.outputs.ai_output_path }}"
           
-          if grep -q "diff --git" "$OUT"; then
+          # FOR DEMO ONLY: If it's the demo text, just force-write it to README
+          if grep -q "This project features an Automated AI Agent" "$OUT"; then
+            echo "Forcing Demo Update to README.md"
+            cat "$OUT" > README.md
+            echo "changed=true" >> $GITHUB_OUTPUT
+          # Otherwise, try the professional git apply logic
+          elif grep -q "diff --git" "$OUT"; then
             git apply --whitespace=fix "$OUT"
             echo "changed=true" >> $GITHUB_OUTPUT
           else

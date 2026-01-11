@@ -1,4 +1,4 @@
-name: Agent Code (Diff -> PR)
+name: Agent Code (Multi-Format Testing)
 
 on:
   issue_comment:
@@ -13,10 +13,10 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  run-agent:
+  # JOB 1: THE NEW ROBUST METHOD (Full Overwrite)
+  run-overwrite-agent:
     if: contains(github.event.comment.body, '@agent-code')
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
@@ -28,20 +28,7 @@ jobs:
         with:
           node-version: 20
 
-      - name: Setup pnpm
-        uses: pnpm/action-setup@v4
-        with:
-          version: 9
-
-      - name: Install dependencies (best-effort)
-        run: |
-          if [ -f package.json ]; then
-            pnpm install --frozen-lockfile || pnpm install
-          else
-            echo "No package.json found. Skipping dependency install."
-          fi
-
-      - name: Call AI Agent (request full files)
+      - name: Call AI (Full Files)
         id: agent
         env:
           AI_BASE_URL: ${{ secrets.AI_BASE_URL }}
@@ -54,110 +41,84 @@ jobs:
           set -euo pipefail
           cat > call-agent.mjs <<'MJS'
           import { writeFileSync } from "node:fs";
-
-          const apiKey = process.env.AI_KEY;
-          const baseUrl = process.env.AI_BASE_URL;
-          const model = process.env.AI_MODEL;
-
-          const system = 
-            "You are a senior code agent. " +
-            "Output your changes in this exact format for each file: " +
-            "FILE: path/to/file.ext\nCONTENT:\n[Full file content here]\nEND_FILE\n" +
-            "NO markdown fences, NO explanations. Just the files.";
-
+          const system = "You are a senior code agent. Output changes in format: FILE: path/to/file.ext\nCONTENT:\n[Full file content]\nEND_FILE\nNO markdown, NO explanations.";
           const user = `Repo: ${process.env.REPO}\nIssue: #${process.env.ISSUE_NUMBER}\nRequest:\n${process.env.COMMENT_BODY}`;
-
-          const res = await fetch(`${baseUrl}/chat/completions`, {
+          const res = await fetch(`${process.env.AI_BASE_URL}/chat/completions`, {
             method: "POST",
-            headers: {
-              "Authorization": `Bearer ${apiKey}`,
-              "Content-Type": "application/json",
-            },
-            body: JSON.stringify({
-              model,
-              messages: [
-                { role: "system", content: system },
-                { role: "user", content: user },
-              ],
-              temperature: 0.1
-            }),
+            headers: { "Authorization": `Bearer ${process.env.AI_KEY}`, "Content-Type": "application/json" },
+            body: JSON.stringify({ model: process.env.AI_MODEL, messages: [{role:"system", content:system}, {role:"user", content:user}], temperature: 0.1 }),
           });
-
           const data = await res.json();
-          let content = data?.choices?.[0]?.message?.content || "";
-          writeFileSync("agent.output", content, "utf8");
+          writeFileSync("agent.output", data?.choices?.[0]?.message?.content || "", "utf8");
           MJS
           node call-agent.mjs
 
-      - name: Debug patch (Claude's Suggestion)
-        run: |
-          echo "=== PATCH CONTENT START ==="
-          cat agent.patch || echo "No patch file found"
-          echo "=== PATCH CONTENT END ==="
-      - name: Configure Git
-        run: |
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "github-actions[bot]@users.noreply.github.com"
-      - name: Apply patch (or skip)
+      - name: Apply changes (Full Overwrite)
         id: apply
         run: |
-          set -euo pipefail
-          
-          # Check for the AI output file instead of a .patch file
-          if [ ! -f agent.output ]; then
-            echo "changed=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          # Robust Parser: This replaces 'git apply'
-          # It reads the FILE/CONTENT/END_FILE markers and writes files directly.
-          # It also handles directory creation for multi-file requests.
-          awk '
-            /^FILE: / { 
-                file=$2; 
-                split(file, parts, "/");
-                dir="";
-                for (i=1; i<length(parts); i++) {
-                    dir = (dir == "" ? parts[i] : dir "/" parts[i]);
-                }
-                if (dir != "") system("mkdir -p " dir);
-                next 
-            }
-            /^CONTENT:/ { writing=1; next }
-            /^END_FILE/ { writing=0; close(file); next }
-            writing { print $0 > file }
-          ' agent.output
-
-          # CLEANUP: Remove technical files before staging to keep the PR pristine
+          if [ ! -f agent.output ]; then echo "changed=false" >> "$GITHUB_OUTPUT"; exit 0; fi
+          awk '/^FILE: / { file=$2; split(file, parts, "/"); dir=""; for (i=1; i<length(parts); i++) { dir = (dir == "" ? parts[i] : dir "/" parts[i]); } if (dir != "") system("mkdir -p " dir); next } /^CONTENT:/ { writing=1; next } /^END_FILE/ { writing=0; close(file); next } writing { print $0 > file }' agent.output
           rm -f call-agent.mjs agent.output pnpm-lock.yaml
-          
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
           git add .
-
-          # Verify if any changes were actually made
-          if [ -n "$(git status --porcelain)" ]; then
-            echo "changed=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "No changes detected."
-            echo "changed=false" >> "$GITHUB_OUTPUT"
-          fi
+          if [ -n "$(git status --porcelain)" ]; then echo "changed=true" >> "$GITHUB_OUTPUT"; else echo "changed=false" >> "$GITHUB_OUTPUT"; fi
 
       - name: Create Pull Request
-        # Use the output from the step above to decide whether to run
         if: steps.apply.outputs.changed == 'true'
         uses: peter-evans/create-pull-request@v6
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          commit-message: "agent-code: apply patch for #${{ github.event.issue.number }}"
-          title: "AI Suggestion for #${{ github.event.issue.number }}"
-          body: |
-            Summarized changes from AI Agent.
-            Fixes #${{ github.event.issue.number }}
-          branch: agent-patch-issue-${{ github.event.issue.number }}
-          base: main # Ensure this matches your default branch
-          delete-branch: true
+          commit-message: "agent-overwrite: apply changes for #${{ github.event.issue.number }}"
+          title: "Overwrite Suggestion for #${{ github.event.issue.number }}"
+          branch: agent-overwrite-${{ github.event.issue.number }}
 
-      - name: Cleanup temporary files
-        if: always()
+  # JOB 2: THE ORIGINAL DIFF METHOD
+  run-diff-agent:
+    if: contains(github.event.comment.body, '@agent-diff')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Call AI (Unified Diff)
+        id: agent
+        env:
+          AI_BASE_URL: ${{ secrets.AI_BASE_URL }}
+          AI_MODEL: ${{ secrets.AI_MODEL }}
+          AI_KEY: ${{ secrets.AI_KEY }}
+          COMMENT_BODY: ${{ github.event.comment.body }}
         run: |
-          rm -f call-agent.mjs
-          rm -f agent.patch
+          cat > call-agent.mjs <<'MJS'
+          import { writeFileSync } from "node:fs";
+          const system = "You are a senior code-change agent. Output a valid unified diff in git format. NO markdown fences.";
+          const user = `Request: ${process.env.COMMENT_BODY}`;
+          const res = await fetch(`${process.env.AI_BASE_URL}/chat/completions`, {
+            method: "POST",
+            headers: { "Authorization": `Bearer ${process.env.AI_KEY}`, "Content-Type": "application/json" },
+            body: JSON.stringify({ model: process.env.AI_MODEL, messages: [{role:"system", content:system}, {role:"user", content:user}], temperature: 0.1 }),
+          });
+          const data = await res.json();
+          writeFileSync("agent.patch", data?.choices?.[0]?.message?.content || "", "utf8");
+          MJS
+          node call-agent.mjs
+
+      - name: Apply patch
+        id: apply
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git apply --3way --ignore-whitespace --recount agent.patch || true
+          rm -f agent.patch call-agent.mjs
+          git add .
+          if [ -n "$(git status --porcelain)" ]; then echo "changed=true" >> "$GITHUB_OUTPUT"; else echo "changed=false" >> "$GITHUB_OUTPUT"; fi
+
+      - name: Create Pull Request
+        if: steps.apply.outputs.changed == 'true'
+        uses: peter-evans/create-pull-request@v6
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          title: "Diff Suggestion for #${{ github.event.issue.number }}"
+          branch: agent-diff-${{ github.event.issue.number }}

@@ -126,45 +126,40 @@ jobs:
         id: apply
         run: |
           set -euo pipefail
-          if [ ! -f agent.patch ]; then
-            echo "changed=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
           
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "github-actions[bot]@users.noreply.github.com"
-
-          # Apply the patch
-          git apply --3way --whitespace=fix --verbose agent.patch
-          
-          # CRITICAL: We must "add" the changes so the PR tool can see them
-          git add .
-
-          if git diff --staged --quiet; then
-            echo "changed=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          echo "changed=true" >> "$GITHUB_OUTPUT"
-
-          # Using --3way to help with slight context mismatches
-          git apply --3way --whitespace=fix --verbose agent.patch
-
-          if git diff --quiet; then
+          if [ ! -f agent.patch ] || [ "$(cat agent.patch)" = "NO_CHANGES" ]; then
+            echo "No valid patch found."
             echo "changed=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
-          echo "changed=true" >> "$GITHUB_OUTPUT"
+          # Apply the patch using 3-way merge to handle context shifts
+          # We use || true because we will check the diff status manually next
+          git apply --3way --whitespace=fix agent.patch || { echo "Patch failed to apply"; exit 1; }
+
+          # IMPORTANT: The peter-evans action needs changes to be either 
+          # staged or unstaged, but we must verify they exist.
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "Changes detected."
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "No changes after applying patch."
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Create Pull Request
+        # Use the output from the step above to decide whether to run
         if: steps.apply.outputs.changed == 'true'
         uses: peter-evans/create-pull-request@v6
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          commit-message: "agent-code: apply patch"
-          title: "agent-code: changes for #${{ github.event.issue.number }}"
-          body: "Applied AI patch based on request: ${{ github.event.comment.body }}"
-          branch: agent-code-${{ github.event.issue.number }}-${{ github.run_id }}
+          commit-message: "agent-code: apply patch for #${{ github.event.issue.number }}"
+          title: "AI Suggestion for #${{ github.event.issue.number }}"
+          body: |
+            Summarized changes from AI Agent.
+            Fixes #${{ github.event.issue.number }}
+          branch: agent-patch-issue-${{ github.event.issue.number }}
+          base: main # Ensure this matches your default branch
           delete-branch: true
 
       - name: Cleanup temporary files

@@ -35,7 +35,6 @@ jobs:
 
       - name: Install dependencies
         run: |
-          # Fallback: Create a basic package.json if missing to allow pnpm to run
           if [ ! -f package.json ]; then
             echo '{"name":"agent-demo","scripts":{"lint":"echo skip","test":"echo skip","build":"echo skip"}}' > package.json
           fi
@@ -51,44 +50,43 @@ jobs:
           set -euo pipefail
 
           if [ -z "$MINIMAX_API_KEY" ]; then
-            echo "DEBUG: No API Key found. Generating a Demo Patch for review."
-            # Creating a fake unified diff to demonstrate the PR flow
+            echo "DEBUG: No API Key found. Generating a Demo Patch."
             cat > agent_output.txt <<'EOF'
-diff --git a/README.md b/README.md
---- a/README.md
-+++ b/README.md
-@@ -1,2 +1,5 @@
- # Project
--This is a placeholder.
-+This project now features an Automated AI Agent.
-+### Capabilities
-+- Automatic PR Generation
-+- Built-in Safety Gates (Lint/Test)
-EOF
+          diff --git a/README.md b/README.md
+          --- a/README.md
+          +++ b/README.md
+          @@ -1,2 +1,5 @@
+           # Project
+          -This is a placeholder.
+          +This project features an Automated AI Agent.
+          +### Capabilities
+          +- Automatic PR Generation
+          +- Built-in Safety Gates
+          EOF
           else
             echo "API Key detected. Running real AI logic..."
             cat > call-agent.mjs <<'MJS'
-            import { writeFileSync } from "node:fs";
-            const apiKey = process.env.MINIMAX_API_KEY;
-            const payload = {
-              model: "MiniMax-M2.1",
-              messages: [
-                { role: "system", content: "Output MUST be a single unified diff patch only. No markdown." },
-                { role: "user", content: process.env.COMMENT_BODY }
-              ],
-            };
-            const res = await fetch("https://api.minimax.io/v1/chat/completions", {
-              method: "POST",
-              headers: { 
-                "Authorization": `Bearer ${apiKey}`,
-                "Content-Type": "application/json" 
-              },
-              body: JSON.stringify(payload),
-            });
-            const data = await res.json();
-            const content = data?.choices?.[0]?.message?.content || "NO_CHANGES";
-            writeFileSync("agent_output.txt", content, "utf8");
-            MJS
+          import { writeFileSync } from "node:fs";
+          const apiKey = process.env.MINIMAX_API_KEY;
+          const payload = {
+            model: "MiniMax-M2.1",
+            messages: [
+              { role: "system", content: "Output MUST be a single unified diff patch only. No markdown." },
+              { role: "user", content: process.env.COMMENT_BODY }
+            ],
+          };
+          const res = await fetch("https://api.minimax.io/v1/chat/completions", {
+            method: "POST",
+            headers: { 
+              "Authorization": `Bearer ${apiKey}`,
+              "Content-Type": "application/json" 
+            },
+            body: JSON.stringify(payload),
+          });
+          const data = await res.json();
+          const content = data?.choices?.[0]?.message?.content || "NO_CHANGES";
+          writeFileSync("agent_output.txt", content, "utf8");
+          MJS
             node call-agent.mjs
           fi
           echo "ai_output_path=agent_output.txt" >> $GITHUB_OUTPUT
@@ -99,7 +97,6 @@ EOF
           set -euo pipefail
           OUT="${{ steps.minimax.outputs.ai_output_path }}"
           
-          # Check if the output is a valid diff
           if grep -q "diff --git" "$OUT"; then
             git apply --whitespace=fix "$OUT"
             echo "changed=true" >> $GITHUB_OUTPUT
